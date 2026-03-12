@@ -18,9 +18,9 @@ Converte presentazioni PDF in documenti LaTeX formattati, utilizzando l'API di A
 
 1. Clona il repository:
    ```bash
-   git clone <url-del-repository>
-   cd test-from-slide-pdf-to-latex-format-git
-   ```
+   git clone https://github.com/macorantonio04-jpg/pdf-to-latex-converter.git
+   cd pdf-to-latex-converter
+
 
 2. Installa le dipendenze Python:
    ```bash
