@@ -6,7 +6,6 @@ Converte presentazioni PDF in documenti LaTeX formattati, utilizzando l'API di A
 
 - **Conversione PDF → LaTeX**: analizza ogni slide e produce un file `.tex` con testo formattato, immagini e formule.
 - **Riassunto PDF**: modalità alternativa che genera un riassunto in Markdown dell'intera presentazione.
-- **Ritaglio interattivo**: tool grafico per rifinire le immagini estratte dalle slide dopo la conversione.
 - **Rilevamento lingua**: rileva automaticamente la lingua della presentazione per configurare Babel.
 
 ## Requisiti
@@ -28,10 +27,10 @@ Converte presentazioni PDF in documenti LaTeX formattati, utilizzando l'API di A
    ```
 
 3. Configura la tua API key Anthropic:
-   ```bash
-   cp pdf_to_latex_converter/.env.example pdf_to_latex_converter/.env
+   Crea un file `.env` all'interno della directory `pdf_to_latex_converter` ed inserisci la tua chiave API:
+   ```env
+   ANTHROPIC_API_KEY=la_tua_api_key_qui
    ```
-   Apri `pdf_to_latex_converter/.env` e sostituisci `INSERISCI_QUI_LA_TUA_API_KEY` con la tua chiave API.
 
 ## Utilizzo
 
@@ -50,25 +49,6 @@ python pdf_to_latex_converter/main.py
 
 I file di output vengono salvati in `pdf_to_latex_converter/output/<titolo>/`.
 
-### Ritaglio interattivo delle immagini
-
-Dopo la conversione, puoi rifinire le immagini estratte:
-
-```bash
-# Avvio automatico (usa la cartella output più recente)
-python pdf_to_latex_converter/interactive_crop.py
-
-# Oppure specifica manualmente una cartella
-python pdf_to_latex_converter/interactive_crop.py percorso/alla/cartella/images
-```
-
-**Controlli:**
-- 🖱 Trascina sull'immagine per selezionare l'area di ritaglio
-- ✔ **Conferma & Salva** — salva il ritaglio
-- ↺ **Reset** — cancella la selezione
-- 🗑 **Elimina** — rimuove l'immagine dal disco
-- ◀ ▶ — naviga tra le immagini
-
 ## Struttura del progetto
 
 ```
@@ -77,8 +57,6 @@ python pdf_to_latex_converter/interactive_crop.py percorso/alla/cartella/images
 ├── README.md
 └── pdf_to_latex_converter/
     ├── main.py              # Applicazione principale (GUI + logica conversione)
-    ├── interactive_crop.py  # Tool di ritaglio interattivo
     ├── .env                 # API key (locale, non versionato)
-    ├── .env.example         # Template per la configurazione
     └── output/              # Cartella di output (generata automaticamente)
 ```
