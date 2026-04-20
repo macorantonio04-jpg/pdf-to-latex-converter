@@ -1,5 +1,4 @@
 import os
-from dotenv import load_dotenv
 import pathlib
 import sys
 import fitz  # PyMuPDF
@@ -11,12 +10,7 @@ import base64
 import subprocess
 import asyncio
 
-# Import del tool di ritaglio interattivo
-try:
-    from interactive_crop import launch_cropper
-    _CROPPER_AVAILABLE = True
-except ImportError:
-    _CROPPER_AVAILABLE = False
+
 
 # --- Initial Configuration ---
 
@@ -25,10 +19,6 @@ def setup_environment() -> AsyncAnthropic:
     Validates the environment and returns an async Anthropic client.
     Raises RuntimeError if the API key is not set (safe for GUI apps).
     """
-    # Carica le variabili d'ambiente dal file .env (se presente)
-    env_path = pathlib.Path(__file__).resolve().parent / ".env"
-    load_dotenv(dotenv_path=env_path)
-
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -112,7 +102,12 @@ async def analyze_and_summarize_slide(
 3.  **LATEX SYNTAX:** Valid LaTeX only. Escape special characters, use `\\textbf`, `\\[ ... \\]` for formulas.
     - Do not use `\\h` for the function h. Just use `h`.
     - Escape underscores `_` in text mode (use `\\_`).
+    - Do not use `\\textit` or `\\textbf` inside math formulas. Use regular math notation (e.g. `s_i^*` not `s_i^\\textit{{*}}`).
+    - Do not output the same line twice. Each line of content must appear only once.
     - Split long formulas with `\\begin{{align*}} ... \\\\ ... \\end{{align*}}`.
+    - **CRITICAL: Every `\\begin{{itemize}}` MUST have a matching `\\end{{itemize}}`. Every `\\begin{{enumerate}}` MUST have a matching `\\end{{enumerate}}`. Never leave a list environment unclosed.**
+    - Do NOT wrap formulas inside `\\[ ... \\]` or `align*` with extra `$` signs. The `$` delimiter is only for inline math. Display math environments already handle math mode.
+    - Do NOT use `$$...$$`. Use `\\[ ... \\]` instead.
 4.  **IRRELEVANT SLIDES:** Return only `[IRRELEVANT]` for slides with no academic content.
 5.  **NO COMMENTARY:** Output **ONLY** the LaTeX code."""
 
@@ -336,6 +331,109 @@ def compile_latex(tex_path: str, status_callback=None):
             status_callback(f"Unexpected compilation error: {e}")
 
 
+def _balance_list_environments(text: str) -> str:
+    r"""
+    Ensures every \begin{itemize/enumerate} has a matching \end{itemize/enumerate}.
+
+    Strategy: walk through lines tracking a nesting stack.  Before any
+    structural boundary (\subsection*, \section*, \begin{figure}, etc.)
+    auto-close any open list environments.  At the very end, close any
+    remaining open environments.  Also removes orphan \end tags that
+    have no matching \begin.
+    """
+    lines = text.split('\n')
+    env_stack = []  # stack of open environment names ('itemize' or 'enumerate')
+    result_lines = []
+
+    # Patterns
+    begin_pat = re.compile(r'\\begin\{(itemize|enumerate)\}')
+    end_pat = re.compile(r'\\end\{(itemize|enumerate)\}')
+    # Structural boundaries where all open lists should be closed
+    boundary_pat = re.compile(
+        r'\\(?:sub)?section\*?\{|\\begin\{figure\}|\\begin\{table\}'
+    )
+
+    for line in lines:
+        stripped = line.strip()
+
+        # If this line is a structural boundary, close all open list envs first
+        if boundary_pat.search(stripped) and env_stack:
+            while env_stack:
+                env = env_stack.pop()
+                result_lines.append(f'\\end{{{env}}}')
+
+        # Process \begin and \end on this line
+        begins = begin_pat.findall(stripped)
+        ends = end_pat.findall(stripped)
+
+        # Check for orphan \end tags (more closes than the stack has)
+        temp_stack = list(env_stack)
+        new_line = line
+        for env_name in ends:
+            if temp_stack and temp_stack[-1] == env_name:
+                temp_stack.pop()
+            elif not temp_stack:
+                # Orphan \end — remove it from the line
+                new_line = re.sub(
+                    r'\\end\{' + env_name + r'\}',
+                    '', new_line, count=1
+                )
+
+        # Now apply to the real stack
+        for env_name in begins:
+            env_stack.append(env_name)
+        for env_name in ends:
+            if env_stack and env_stack[-1] == env_name:
+                env_stack.pop()
+
+        # Only add the line if it still has content (after orphan removal)
+        if new_line.strip() or not ends:
+            result_lines.append(new_line)
+
+    # Close any remaining open environments at the end
+    while env_stack:
+        env = env_stack.pop()
+        result_lines.append(f'\\end{{{env}}}')
+
+    return '\n'.join(result_lines)
+
+
+def _fix_redundant_dollars(text: str) -> str:
+    """
+    Fixes redundant $ signs in LaTeX math environments:
+    1. Removes $ wrapping inside \\[...\\] display math
+    2. Removes $ wrapping inside align*, equation*, gather* environments
+    3. Converts $$...$$ to \\[...\\]
+    """
+    # Convert $$...$$ to \[...\]
+    text = re.sub(r'\$\$(.+?)\$\$', lambda m: '\\[' + m.group(1) + '\\]', text, flags=re.DOTALL)
+
+    # Remove redundant $ inside \[...\] — e.g. \[ $x + y$ \] → \[ x + y \]
+    def _strip_dollars_in_display(match):
+        inner = match.group(1)
+        # Remove $ pairs inside the display math
+        inner = re.sub(r'(?<!\\)\$(.+?)(?<!\\)\$', r'\1', inner)
+        return r'\[' + inner + r'\]'
+    text = re.sub(r'\\\[(.+?)\\\]', _strip_dollars_in_display, text, flags=re.DOTALL)
+
+    # Remove redundant $ inside align*, equation*, gather*
+    def _strip_dollars_in_env(match):
+        env_name = match.group(1)
+        inner = match.group(2)
+        inner = re.sub(r'(?<!\\)\$(.+?)(?<!\\)\$', r'\1', inner)
+        return f'\\begin{{{env_name}}}' + inner + f'\\end{{{env_name}}}'
+    text = re.sub(
+        r'\\begin\{(align\*|equation\*|gather\*|align|equation|gather)\}'
+        r'(.+?)'
+        r'\\end\{\1\}',
+        _strip_dollars_in_env,
+        text,
+        flags=re.DOTALL,
+    )
+
+    return text
+
+
 def _clean_analysis_result(analysis_result: str) -> str:
     """
     Post-processes Claude's output to fix common Markdown-in-LaTeX issues.
@@ -365,8 +463,40 @@ def _clean_analysis_result(analysis_result: str) -> str:
     analysis_result = analysis_result.replace(r"\h(", "h(").replace(r"\h{", "h{")
     # Replace unicode minus with ASCII hyphen
     analysis_result = analysis_result.replace("−", "-")
-    # Escape bare $ followed by a number (avoids unintended math mode)
-    analysis_result = re.sub(r"(?<!\\)\$\s*(-?\d)", r"\\$\1", analysis_result)
+
+    # Fix redundant $ signs in display math environments
+    analysis_result = _fix_redundant_dollars(analysis_result)
+
+    # Escape bare $ that are NOT part of a $...$ math-mode pair.
+    # Strategy: find legitimate math-mode pairs first, then only escape
+    # orphan $ signs (followed by a digit) outside of math pairs.
+    def _escape_orphan_dollars(text):
+        math_spans = [(m.start(), m.end()) for m in re.finditer(r'(?<!\\)\$(?!\$).+?(?<!\\)\$', text)]
+        result = []
+        last = 0
+        for start, end in math_spans:
+            gap = re.sub(r'(?<!\\)\$\s*(-?\d)', r'\\$\1', text[last:start])
+            result.append(gap)
+            result.append(text[start:end])  # keep math pair intact
+            last = end
+        tail = re.sub(r'(?<!\\)\$\s*(-?\d)', r'\\$\1', text[last:])
+        result.append(tail)
+        return ''.join(result)
+    analysis_result = _escape_orphan_dollars(analysis_result)
+
+    # Balance unclosed itemize/enumerate environments
+    analysis_result = _balance_list_environments(analysis_result)
+
+    # Remove duplicate consecutive lines (Claude sometimes outputs a broken
+    # line followed by the corrected version)
+    lines = analysis_result.split('\n')
+    deduped = []
+    for line in lines:
+        stripped = line.strip()
+        if deduped and stripped and stripped == deduped[-1].strip():
+            continue
+        deduped.append(line)
+    analysis_result = '\n'.join(deduped)
 
     return analysis_result
 
@@ -432,8 +562,7 @@ async def process_pdf(
                 author = author_match.group(1)
 
     # Create output directories AFTER knowing the real title (fixes wrong-dir bug)
-    _script_dir = pathlib.Path(__file__).resolve().parent
-    output_dir = str(_script_dir / "output" / pdf_title)
+    output_dir = os.path.abspath(os.path.join("output", pdf_title))
     images_dir = os.path.join(output_dir, "images")
     pathlib.Path(images_dir).mkdir(parents=True, exist_ok=True)
     update_status(f"Output directory set to: {output_dir}")
@@ -559,9 +688,14 @@ async def process_pdf(
 
     latex_content.append(generate_latex_end())
 
+    # Final pass: balance list environments across the full assembled document.
+    # Per-slide balancing may miss unclosed envs that span slide boundaries.
+    final_text = "\n".join(latex_content)
+    final_text = _balance_list_environments(final_text)
+
     final_latex_path = os.path.join(output_dir, f"{pdf_title}.tex")
     with open(final_latex_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(latex_content))
+        f.write(final_text)
 
     update_status(f"\nProcessing complete! File saved to: {final_latex_path}")
     update_status(f"Images saved to: {images_dir}")
@@ -640,8 +774,7 @@ async def process_pdf_summary(
 
     summary_text = message.content[0].text
     pdf_title = os.path.splitext(os.path.basename(pdf_path))[0]
-    _script_dir = pathlib.Path(__file__).resolve().parent
-    output_dir = str(_script_dir / "output" / pdf_title)
+    output_dir = os.path.abspath(os.path.join("output", pdf_title))
     pathlib.Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     output_path = os.path.join(output_dir, f"{pdf_title}_summary.md")
@@ -862,19 +995,6 @@ class PdfToLatexApp:
         if final_latex_path:
             self.output_dir = os.path.dirname(final_latex_path)
             self.open_output_button.config(state=tk.NORMAL)
-
-            # ── Avvia il cropper se ci sono immagini nell'output ──────────────
-            images_dir = os.path.join(self.output_dir, "images")
-            if _CROPPER_AVAILABLE and os.path.isdir(images_dir):
-                ask = messagebox.askyesno(
-                    "Ritaglio immagini",
-                    "La conversione è terminata.\n\n"
-                    "Vuoi aprire il tool di ritaglio interattivo\n"
-                    "per rifinire le immagini salvate?",
-                    icon="question",
-                )
-                if ask:
-                    self.root.after(200, lambda: launch_cropper(images_dir))
         else:
             self.open_output_button.config(state=tk.DISABLED)
 
